@@ -1,5 +1,6 @@
-flask
+Flask
 pandas
 requests
 statsmodels
-gunicorn
+scikit-learn
+gunicorn  # Required for Render deployment
