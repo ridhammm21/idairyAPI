@@ -9,28 +9,10 @@ import os  # Required for Render deployment
 
 app = Flask(__name__)
 
-# ✅ Google Sheets Public URLs
-MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1MCrucUxUJXQQwpQ-thS2yVbVe8vn2xIVM8s7WatKBXE/gviz/tq?tqx=out:csv&gid=0"
+# ✅ Base Google Sheets Public URL (Now Only Using GID)
 BASE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1MCrucUxUJXQQwpQ-thS2yVbVe8vn2xIVM8s7WatKBXE/gviz/tq?tqx=out:csv&gid="
 
-# ✅ Fetch product-to-gid mapping from the master sheet
-def get_product_gid():
-    try:
-        response = requests.get(MASTER_SHEET_URL)
-        response.raise_for_status()
-
-        df = pd.read_csv(StringIO(response.text))
-        df.columns = ["Product", "GID"]  # Ensure master sheet has "Product" and "GID" columns
-        df["Product"] = df["Product"].str.strip().str.lower()  # Normalize product names
-
-        product_mapping = dict(zip(df["Product"], df["GID"]))
-        print(f"🔄 Updated Product Mapping: {product_mapping}")  # Debugging log
-        return product_mapping
-    except Exception as e:
-        print(f"❌ Error fetching product-to-gid mapping: {e}")
-        return {}
-
-# ✅ Load product data from the corresponding sub-sheet
+# ✅ Load product data from the corresponding sub-sheet (Using GID)
 def load_data(gid):
     try:
         sheet_url = BASE_SHEET_URL + str(gid)
@@ -103,32 +85,25 @@ def forecast_sarima(df, steps=6):
         print(f"❌ Error in SARIMA model: {e}")
         return {"forecast": [], "error": str(e)}
 
+# ✅ New Flask Endpoint - Now Accepts GID Instead of Product Name
 @app.route("/forecast", methods=["GET"])
 def get_forecast():
     try:
-        # ✅ Get product name from query params (e.g., /forecast?product=Milk)
-        product = request.args.get("product")
+        # ✅ Get GID from query params (e.g., /forecast?gid=123456)
+        gid = request.args.get("gid")
 
-        if not product:
-            return jsonify({"status": "error", "message": "Missing product name."})
+        if not gid:
+            return jsonify({"status": "error", "message": "Missing GID (sub-sheet ID)."})
 
-        product = product.strip().lower()  # Normalize product name
-        product_mapping = get_product_gid()  # Fetch latest product mapping
-
-        if product not in product_mapping:
-            return jsonify({"status": "error", "message": f"Product '{product}' not found in the database."})
-
-        # ✅ Get the `gid` (sub-sheet ID) for the requested product
-        gid = product_mapping[product]
-        print(f"🔍 Fetching data for Product: {product} (GID: {gid})")
+        print(f"🔍 Fetching data for GID: {gid}")
 
         df = load_data(gid)
 
         if df.empty:
-            return jsonify({"status": "error", "message": f"No data available for product '{product}'."})
+            return jsonify({"status": "error", "message": f"No data available for GID '{gid}'."})
 
         result = forecast_sarima(df, steps=6)
-        return jsonify({"status": "success", "product": product, "data": result})
+        return jsonify({"status": "success", "gid": gid, "data": result})
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
