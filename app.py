@@ -15,86 +15,100 @@ BASE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1MCrucUxUJXQQwpQ-thS2yV
 
 # ✅ Fetch product-to-gid mapping from the master sheet
 def get_product_gid():
-    response = requests.get(MASTER_SHEET_URL)
-    response.raise_for_status()
+    try:
+        response = requests.get(MASTER_SHEET_URL)
+        response.raise_for_status()
 
-    df = pd.read_csv(StringIO(response.text))
-    df.columns = ["Product", "GID"]  # Ensure master sheet has "Product" and "GID" columns
-    df["Product"] = df["Product"].str.strip().str.lower()  # Normalize product names
+        df = pd.read_csv(StringIO(response.text))
+        df.columns = ["Product", "GID"]  # Ensure master sheet has "Product" and "GID" columns
+        df["Product"] = df["Product"].str.strip().str.lower()  # Normalize product names
 
-    return dict(zip(df["Product"], df["GID"]))
+        product_mapping = dict(zip(df["Product"], df["GID"]))
+        print(f"🔄 Updated Product Mapping: {product_mapping}")  # Debugging log
+        return product_mapping
+    except Exception as e:
+        print(f"❌ Error fetching product-to-gid mapping: {e}")
+        return {}
 
 # ✅ Load product data from the corresponding sub-sheet
 def load_data(gid):
-    sheet_url = BASE_SHEET_URL + str(gid)
-    response = requests.get(sheet_url)
-    response.raise_for_status()
-    
-    df = pd.read_csv(StringIO(response.text))
-    df.columns = ["Date", "Total"]
-    
-    df["Date"] = pd.to_datetime(df["Date"], format="%d-%m-%Y", errors="coerce")
-    df = df.sort_values("Date").set_index("Date")
-    
-    # ✅ Set frequency to 'MS' (monthly start), filling missing months with interpolation
-    df = df.asfreq("MS").interpolate()
-    
-    return df
+    try:
+        sheet_url = BASE_SHEET_URL + str(gid)
+        response = requests.get(sheet_url)
+        response.raise_for_status()
+
+        df = pd.read_csv(StringIO(response.text))
+        df.columns = ["Date", "Total"]
+
+        df["Date"] = pd.to_datetime(df["Date"], format="%d-%m-%Y", errors="coerce")
+        df = df.sort_values("Date").set_index("Date")
+
+        # ✅ Set frequency to 'MS' (monthly start), filling missing months with interpolation
+        df = df.asfreq("MS").interpolate()
+
+        return df
+    except Exception as e:
+        print(f"❌ Error loading data for GID {gid}: {e}")
+        return pd.DataFrame()  # Return empty DataFrame if error occurs
 
 # ✅ SARIMA Forecasting
 def forecast_sarima(df, steps=6):
-    df["Total"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0)
+    try:
+        df["Total"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0)
 
-    # ✅ Train/Test Split
-    train_size = int(len(df) * 0.8)  # 80% train, 20% test
-    train, test = df.iloc[:train_size], df.iloc[train_size:]
+        # ✅ Train/Test Split
+        train_size = int(len(df) * 0.8)  # 80% train, 20% test
+        train, test = df.iloc[:train_size], df.iloc[train_size:]
 
-    # ✅ SARIMA model
-    sarima_model = sm.tsa.statespace.SARIMAX(train["Total"], 
-                                             order=(1, 1, 1),  
-                                             seasonal_order=(1, 1, 1, 12),  
-                                             enforce_stationarity=False,
-                                             enforce_invertibility=False)
-    
-    results = sarima_model.fit(disp=False)
+        # ✅ SARIMA model
+        sarima_model = sm.tsa.statespace.SARIMAX(train["Total"], 
+                                                 order=(1, 1, 1),  
+                                                 seasonal_order=(1, 1, 1, 12),  
+                                                 enforce_stationarity=False,
+                                                 enforce_invertibility=False)
 
-    # ✅ Validate Model Performance
-    predictions = results.get_prediction(start=len(train), end=len(df)-1)
-    predicted_values = predictions.predicted_mean
-    actual_values = test["Total"]
+        results = sarima_model.fit(disp=False)
 
-    mse = mean_squared_error(actual_values, predicted_values)
-    rmse = mse ** 0.5
-    mae = mean_absolute_error(actual_values, predicted_values)
-    mape = (abs((actual_values - predicted_values) / actual_values).mean()) * 100
-    r2 = r2_score(actual_values, predicted_values)
-    accuracy = 100 - mape
+        # ✅ Validate Model Performance
+        predictions = results.get_prediction(start=len(train), end=len(df)-1)
+        predicted_values = predictions.predicted_mean
+        actual_values = test["Total"]
 
-    # ✅ Predict next `steps` months
-    forecast = results.get_forecast(steps=steps)
-    predicted_future = forecast.predicted_mean.round(2)
-    future_dates = [df.index[-1] + pd.DateOffset(months=i) for i in range(1, steps + 1)]
-    
-    forecast_data = [{"date": str(date.date()), "forecast": float(forecast)} for date, forecast in zip(future_dates, predicted_future)]
-    
-    return {
-        "forecast": forecast_data,
-        "evaluation": {
-            "MSE": round(mse, 2),
-            "RMSE": round(rmse, 2),
-            "MAE": round(mae, 2),
-            "MAPE": round(mape, 2),
-            "R2 Score": round(r2, 2),
-            "Accuracy": round(accuracy, 2),
+        mse = mean_squared_error(actual_values, predicted_values)
+        rmse = mse ** 0.5
+        mae = mean_absolute_error(actual_values, predicted_values)
+        mape = (abs((actual_values - predicted_values) / actual_values).mean()) * 100
+        r2 = r2_score(actual_values, predicted_values)
+        accuracy = 100 - mape
+
+        # ✅ Predict next `steps` months
+        forecast = results.get_forecast(steps=steps)
+        predicted_future = forecast.predicted_mean.round(2)
+        future_dates = [df.index[-1] + pd.DateOffset(months=i) for i in range(1, steps + 1)]
+
+        forecast_data = [{"date": str(date.date()), "forecast": float(forecast)} for date, forecast in zip(future_dates, predicted_future)]
+
+        return {
+            "forecast": forecast_data,
+            "evaluation": {
+                "MSE": round(mse, 2),
+                "RMSE": round(rmse, 2),
+                "MAE": round(mae, 2),
+                "MAPE": round(mape, 2),
+                "R2 Score": round(r2, 2),
+                "Accuracy": round(accuracy, 2),
+            }
         }
-    }
+    except Exception as e:
+        print(f"❌ Error in SARIMA model: {e}")
+        return {"forecast": [], "error": str(e)}
 
 @app.route("/forecast", methods=["GET"])
 def get_forecast():
     try:
         # ✅ Get product name from query params (e.g., /forecast?product=Milk)
         product = request.args.get("product")
-        
+
         if not product:
             return jsonify({"status": "error", "message": "Missing product name."})
 
@@ -102,15 +116,20 @@ def get_forecast():
         product_mapping = get_product_gid()  # Fetch latest product mapping
 
         if product not in product_mapping:
-            return jsonify({"status": "error", "message": f"Product '{product}' not found."})
-        
+            return jsonify({"status": "error", "message": f"Product '{product}' not found in the database."})
+
         # ✅ Get the `gid` (sub-sheet ID) for the requested product
         gid = product_mapping[product]
+        print(f"🔍 Fetching data for Product: {product} (GID: {gid})")
+
         df = load_data(gid)
-        
+
+        if df.empty:
+            return jsonify({"status": "error", "message": f"No data available for product '{product}'."})
+
         result = forecast_sarima(df, steps=6)
         return jsonify({"status": "success", "product": product, "data": result})
-    
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
