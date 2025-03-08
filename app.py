@@ -5,14 +5,14 @@ from io import StringIO
 import statsmodels.api as sm
 from datetime import datetime
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import os  # Required for Render deployment
+import os  
 
 app = Flask(__name__)
 
-# ✅ Base Google Sheets Public URL (Now Only Using GID)
+# ✅ Base Google Sheets Public URL
 BASE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1MCrucUxUJXQQwpQ-thS2yVbVe8vn2xIVM8s7WatKBXE/gviz/tq?tqx=out:csv&gid="
 
-# ✅ Load product data from the corresponding sub-sheet (Using GID)
+# ✅ Load product data from the corresponding sub-sheet
 def load_data(gid):
     try:
         sheet_url = BASE_SHEET_URL + str(gid)
@@ -25,31 +25,44 @@ def load_data(gid):
         df["Date"] = pd.to_datetime(df["Date"], format="%d-%m-%Y", errors="coerce")
         df = df.sort_values("Date").set_index("Date")
 
-        # ✅ Set frequency to 'MS' (monthly start), filling missing months with interpolation
-        df = df.asfreq("MS").interpolate()
+        # ✅ Ensure data is complete with spline interpolation
+        df = df.asfreq("MS").interpolate(method="spline", order=2)
 
         return df
     except Exception as e:
         print(f"❌ Error loading data for GID {gid}: {e}")
-        return pd.DataFrame()  # Return empty DataFrame if error occurs
+        return pd.DataFrame()
+
+# ✅ Augmented Dickey-Fuller (ADF) Test for Stationarity
+from statsmodels.tsa.stattools import adfuller
+
+def check_stationarity(df):
+    result = adfuller(df["Total"])
+    return result[1]  # p-value (if < 0.05, data is stationary)
 
 # ✅ SARIMA Forecasting
-def forecast_sarima(df, steps=6):
+def forecast_sarima(df, steps=12):
     try:
         df["Total"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0)
 
-        # ✅ Train/Test Split
-        train_size = int(len(df) * 0.8)  # 80% train, 20% test
+        # ✅ Train/Test Split (90% train, 10% test)
+        train_size = int(len(df) * 0.9)
         train, test = df.iloc[:train_size], df.iloc[train_size:]
 
-        # ✅ SARIMA model
+        # ✅ Apply Differencing If Needed
+        p_value = check_stationarity(train)
+        if p_value > 0.05:
+            print("🔄 Data is non-stationary, applying first-order differencing")
+            train["Total"] = train["Total"].diff().dropna()
+
+        # ✅ Optimized SARIMA Model
         sarima_model = sm.tsa.statespace.SARIMAX(train["Total"], 
-                                                 order=(1, 1, 1),  
+                                                 order=(2, 1, 2),  
                                                  seasonal_order=(1, 1, 1, 12),  
                                                  enforce_stationarity=False,
                                                  enforce_invertibility=False)
 
-        results = sarima_model.fit(disp=False)
+        results = sarima_model.fit(maxiter=500, disp=False)
 
         # ✅ Validate Model Performance
         predictions = results.get_prediction(start=len(train), end=len(df)-1)
@@ -85,11 +98,10 @@ def forecast_sarima(df, steps=6):
         print(f"❌ Error in SARIMA model: {e}")
         return {"forecast": [], "error": str(e)}
 
-# ✅ New Flask Endpoint - Now Accepts GID Instead of Product Name
+# ✅ Flask Endpoint - Accepts GID
 @app.route("/forecast", methods=["GET"])
 def get_forecast():
     try:
-        # ✅ Get GID from query params (e.g., /forecast?gid=123456)
         gid = request.args.get("gid")
 
         if not gid:
@@ -102,12 +114,12 @@ def get_forecast():
         if df.empty:
             return jsonify({"status": "error", "message": f"No data available for GID '{gid}'."})
 
-        result = forecast_sarima(df, steps=6)
+        result = forecast_sarima(df, steps=12)
         return jsonify({"status": "success", "gid": gid, "data": result})
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Required for Render deployment
+    port = int(os.environ.get("PORT", 5000))  
     app.run(host="0.0.0.0", port=port)
