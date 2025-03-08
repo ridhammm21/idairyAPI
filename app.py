@@ -4,15 +4,13 @@ import requests
 from io import StringIO
 import statsmodels.api as sm
 from datetime import datetime
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import os  
+from statsmodels.tsa.stattools import adfuller
+import numpy as np
 
 app = Flask(__name__)
 
-# ✅ Base Google Sheets Public URL
 BASE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1MCrucUxUJXQQwpQ-thS2yVbVe8vn2xIVM8s7WatKBXE/gviz/tq?tqx=out:csv&gid="
 
-# ✅ Load product data from the corresponding sub-sheet
 def load_data(gid):
     try:
         sheet_url = BASE_SHEET_URL + str(gid)
@@ -25,25 +23,25 @@ def load_data(gid):
         df["Date"] = pd.to_datetime(df["Date"], format="%d-%m-%Y", errors="coerce")
         df = df.sort_values("Date").set_index("Date")
 
-        # ✅ Ensure data is complete with spline interpolation
-        df = df.asfreq("MS").interpolate(method="spline", order=2)
+        # ✅ Fill missing values using rolling mean
+        df["Total"] = df["Total"].rolling(3, min_periods=1).mean()
 
         return df
     except Exception as e:
         print(f"❌ Error loading data for GID {gid}: {e}")
         return pd.DataFrame()
 
-# ✅ Augmented Dickey-Fuller (ADF) Test for Stationarity
-from statsmodels.tsa.stattools import adfuller
-
 def check_stationarity(df):
     result = adfuller(df["Total"])
-    return result[1]  # p-value (if < 0.05, data is stationary)
+    return result[1]  # p-value (< 0.05 means data is stationary)
 
-# ✅ SARIMA Forecasting
 def forecast_sarima(df, steps=12):
     try:
         df["Total"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0)
+
+        # ✅ Apply log transformation if needed
+        if df["Total"].min() > 0:
+            df["Total"] = np.log1p(df["Total"])
 
         # ✅ Train/Test Split (90% train, 10% test)
         train_size = int(len(df) * 0.9)
@@ -52,33 +50,31 @@ def forecast_sarima(df, steps=12):
         # ✅ Apply Differencing If Needed
         p_value = check_stationarity(train)
         if p_value > 0.05:
-            print("🔄 Data is non-stationary, applying first-order differencing")
+            print("🔄 Data is non-stationary, applying differencing")
             train["Total"] = train["Total"].diff().dropna()
 
-        # ✅ Optimized SARIMA Model
+        # ✅ Optimized SARIMA Model (Simpler)
         sarima_model = sm.tsa.statespace.SARIMAX(train["Total"], 
-                                                 order=(2, 1, 2),  
-                                                 seasonal_order=(1, 1, 1, 12),  
+                                                 order=(1,1,1),  
+                                                 seasonal_order=(0,1,1,12),  
                                                  enforce_stationarity=False,
                                                  enforce_invertibility=False)
 
-        results = sarima_model.fit(maxiter=500, disp=False)
+        results = sarima_model.fit(disp=False)
 
         # ✅ Validate Model Performance
         predictions = results.get_prediction(start=len(train), end=len(df)-1)
         predicted_values = predictions.predicted_mean
         actual_values = test["Total"]
 
-        mse = mean_squared_error(actual_values, predicted_values)
-        rmse = mse ** 0.5
-        mae = mean_absolute_error(actual_values, predicted_values)
-        mape = (abs((actual_values - predicted_values) / actual_values).mean()) * 100
+        # ✅ SMAPE (Better than MAPE)
+        smape = 100 * np.mean(2 * np.abs(actual_values - predicted_values) / (np.abs(actual_values) + np.abs(predicted_values)))
         r2 = r2_score(actual_values, predicted_values)
-        accuracy = 100 - mape
+        accuracy = max(0, 100 - smape)  # Avoid negative accuracy
 
-        # ✅ Predict next `steps` months
+        # ✅ Forecast next `steps` months
         forecast = results.get_forecast(steps=steps)
-        predicted_future = forecast.predicted_mean.round(2)
+        predicted_future = np.expm1(forecast.predicted_mean).round(2)  # Reverse log transformation
         future_dates = [df.index[-1] + pd.DateOffset(months=i) for i in range(1, steps + 1)]
 
         forecast_data = [{"date": str(date.date()), "forecast": float(forecast)} for date, forecast in zip(future_dates, predicted_future)]
@@ -86,10 +82,7 @@ def forecast_sarima(df, steps=12):
         return {
             "forecast": forecast_data,
             "evaluation": {
-                "MSE": round(mse, 2),
-                "RMSE": round(rmse, 2),
-                "MAE": round(mae, 2),
-                "MAPE": round(mape, 2),
+                "SMAPE": round(smape, 2),
                 "R2 Score": round(r2, 2),
                 "Accuracy": round(accuracy, 2),
             }
@@ -98,7 +91,6 @@ def forecast_sarima(df, steps=12):
         print(f"❌ Error in SARIMA model: {e}")
         return {"forecast": [], "error": str(e)}
 
-# ✅ Flask Endpoint - Accepts GID
 @app.route("/forecast", methods=["GET"])
 def get_forecast():
     try:
@@ -121,5 +113,4 @@ def get_forecast():
         return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
